@@ -1,0 +1,311 @@
+# mount to your drive!
+from google.colab import drive
+drive.mount('/content/drive/')
+
+
+# imports
+import os
+import cv2
+import numpy as np
+import pandas as pd
+import string
+import time
+import random
+import imutils
+import glob
+import gc
+from PIL import Image
+from tqdm import tqdm
+tqdm.pandas()
+
+# to visualize and understand the data
+import matplotlib
+import matplotlib.pyplot as plt
+import plotly
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from sklearn.manifold import TSNE
+
+# for building and training the model
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.preprocessing.image import load_img, img_to_array, array_to_img
+from keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.layers import Dense, Flatten, Dropout
+from keras.models import load_model, Model
+from keras.optimizers import Adam
+from keras.callbacks import ModelCheckpoint, EarlyStopping
+
+# for learning metrics to see model performance
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
+
+# using pretrained CV model VGG16
+from tensorflow.keras.applications import VGG16
+
+
+# configuration
+class configuration:
+    batch_size = 64
+    img_height = 64
+    img_width = 64
+    epochs = 10
+    num_classes = 29
+    img_channels = 3
+
+def seed_everything(seed: int):
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
+
+# labels
+train_path = "/content/drive/MyDrive/CAIS/F23_Curriculum/F23_winterproj/asl_alphabet/asl_alphabet_train/asl_alphabet_train"
+labels = []
+alphabet = list(string.ascii_uppercase)
+labels.extend(alphabet)
+labels.extend(["del", "nothing", "space"])
+print(labels)
+
+
+# visualize data
+def sample_images(labels):
+    # create subplots
+    y_size = 12
+    if(len(labels)<10):
+        y_size = y_size * len(labels) / 10
+    fig, axs = plt.subplots(len(labels), 9, figsize=(y_size, 13))
+
+    for i, label in enumerate(labels):
+        axs[i, 0].text(0.5, 0.5, label, ha='center', va='center', fontsize=8)
+        axs[i, 0].axis('off')
+
+        label_path = os.path.join(train_path, label)
+        list_files = os.listdir(label_path)
+
+        for j in range(8):
+            img_label = cv2.imread(os.path.join(label_path, list_files[j]))
+            img_label = cv2.cvtColor(img_label, cv2.COLOR_BGR2RGB)
+            axs[i, j+1].imshow(img_label)
+            axs[i, j+1].axis("off")
+
+    # title
+    plt.suptitle("Sample Images in ASL Alphabet Dataset", x=0.55, y=0.92)
+
+    # show
+    plt.show()
+
+
+sample_images(labels[:10])
+
+
+sample_images(labels[20:])
+
+
+# Create Metadata
+list_path = []
+list_labels = []
+for label in labels:
+    label_path = os.path.join(train_path, label, "*")
+    image_files = glob.glob(label_path)
+    
+    sign_label = [label] * len(image_files)
+    
+    list_path.extend(image_files)
+    list_labels.extend(sign_label)
+
+metadata = pd.DataFrame({
+    "image_path": list_path,
+    "label": list_labels
+})
+
+metadata
+
+
+# Split Dataset to Train 0.65, and Test 0.35
+X_train, X_test, y_train, y_test = train_test_split(
+    metadata["image_path"], metadata["label"], 
+    test_size=0.35, 
+    random_state=2023, 
+    shuffle=True, 
+    stratify=metadata["label"]
+)
+data_train = pd.DataFrame({
+    "image_path": X_train,
+    "label": y_train
+})
+
+display(data_train)
+display(data_test)
+
+
+# Data Augmentation (Just Rescale)
+def data_augmentation():
+    datagen = ImageDataGenerator(rescale=1/255.,)
+    # Training Dataset
+    train_generator = datagen.flow_from_dataframe(
+        data_train,
+        directory="./",
+        x_col="image_path",
+        y_col="label",
+        class_mode="categorical",
+        batch_size=configuration.batch_size,
+        target_size=(configuration.img_height, configuration.img_width),
+    )
+    
+    # Testing Dataset
+    test_generator = datagen.flow_from_dataframe(
+        data_test,
+        directory="./",
+        x_col="image_path",
+        y_col="label",
+        class_mode="categorical",
+        batch_size=1,
+        target_size=(configuration.img_height, configuration.img_width),
+        shuffle=False
+    )
+    
+    return train_generator, test_generator
+
+
+seed_everything(2023)
+train_generator, test_generator = data_augmentation()
+
+
+# Load VGG16 model and modify for ASL recognition
+base_model = VGG16(weights='imagenet', include_top=False, input_shape=(configuration.img_height, configuration.img_width, configuration.img_channels))
+
+for layer in base_model.layers:
+    layer.trainable = False
+
+x = base_model.output
+x = Flatten()(x)
+x = Dense(512, activation='relu')(x)
+x = Dropout(0.5)(x)
+x = Dense(512, activation='relu')(x)
+x = Dropout(0.5)(x)
+predictions = Dense(29, activation='softmax')(x)
+
+model = Model(inputs=base_model.input, outputs=predictions)
+
+display(model.summary())
+display(tf.keras.utils.plot_model(model, to_file='vgg16.png', show_shapes=True))
+
+
+# Select GPU if available
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
+
+
+# Compile and train the model
+model.compile(optimizer=Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Callbacks
+checkpoint = ModelCheckpoint('asl_vgg16_best_weights.h5', save_best_only=True, monitor='val_accuracy', mode='max')
+
+
+# Train the Model
+history = model.fit(
+    train_generator,
+    steps_per_epoch=train_generator.samples // configuration.batch_size,
+    epochs=configuration.epochs,
+    validation_data=validation_generator,
+    validation_steps=validation_generator.samples // configuration.batch_size,
+    callbacks=[checkpoint]
+)
+
+
+scores = model.evaluate(test_generator)
+print("%s: %.2f%%" % ("Evaluate Test Accuracy", scores[1]*100))
+
+
+# Visualize Training and Validation Results
+
+# Create Subplot
+fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=["Model Loss", "Model Accuracy"], 
+)
+
+# Configuration Plot
+class PlotCFG:
+    marker_size = 8
+    line_size = 2
+    train_color = "#76503d"
+    valid_color = "#deb392"
+
+# Loss Plot
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+fig.add_trace(
+    go.Scatter(
+        x=np.arange(1, len(loss)+1), y=loss,
+        mode="markers+lines",
+        marker=dict(
+            color=PlotCFG.train_color, size=PlotCFG.marker_size,
+            line=dict(color="White", width=0.5)
+        ),
+        line=dict(color=PlotCFG.train_color, width=PlotCFG.line_size),
+        name="Training Loss"
+    ), row=1, col=1
+)
+fig.add_trace(
+    go.Scatter(
+        x=np.arange(1, len(val_loss)+1), y=val_loss,
+        mode="markers+lines",
+        marker=dict(
+            color=PlotCFG.valid_color, size=PlotCFG.marker_size,
+            line=dict(color="White", width=0.5)
+        ),
+        line=dict(color=PlotCFG.valid_color, width=PlotCFG.line_size),
+        name="Validation Loss"
+    ), row=1, col=1
+)
+
+# Accuracy Plot
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+fig.add_trace(
+    go.Scatter(
+        x=np.arange(1, len(acc)+1), y=acc,
+        mode="markers+lines",
+        marker=dict(
+            color=PlotCFG.train_color, size=PlotCFG.marker_size,
+            line=dict(color="White", width=0.5)
+        ),
+        line=dict(color=PlotCFG.train_color, width=PlotCFG.line_size),
+        name="Training Accuracy"
+    ), row=1, col=2
+)
+fig.add_trace(
+    go.Scatter(
+        x=np.arange(1, len(val_acc)+1), y=val_acc,
+        mode="markers+lines",
+        marker=dict(
+            color=PlotCFG.valid_color, size=PlotCFG.marker_size,
+            line=dict(color="White", width=0.5)
+        ),
+        line=dict(color=PlotCFG.valid_color, width=PlotCFG.line_size),
+        name="Validation Accuracy"
+    ), row=1, col=2
+)
+
+# Update Axes
+fig.update_xaxes(title="Epochs", linecolor="Black", ticks="outside", row=1, col=1)
+fig.update_xaxes(title="Epochs", linecolor="Black", ticks="outside", row=1, col=2)
+fig.update_yaxes(title="Categorical Loss", linecolor="Black", ticks="outside", row=1, col=1)
+fig.update_yaxes(title="Accuracy", linecolor="Black", ticks="outside", row=1, col=2)
+
+# Update Layout
+fig.update_layout(
+    title="Training Loss and Metrics", title_x=0.5,
+    width=950, height=400,
+    showlegend=False,
+    plot_bgcolor="White",
+    paper_bgcolor="White"
+)
+
+# Show
+fig.show(iframe_connected=True)
